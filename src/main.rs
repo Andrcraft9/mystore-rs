@@ -4,18 +4,12 @@ use crossterm::{
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
-use std::{
-    cmp::Reverse,
-    io,
-    path::Path,
-    path::PathBuf,
-    time::SystemTime,
-};
+use std::{cmp::Reverse, io, path::Path, path::PathBuf, time::SystemTime};
 use tui::{
     backend::{Backend, CrosstermBackend},
     layout::{Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
-    text::{Text},
+    text::Text,
     widgets::{self, Block, Borders, List, ListItem, ListState, Paragraph},
     Frame, Terminal,
 };
