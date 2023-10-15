@@ -1,27 +1,22 @@
 use clap::Parser;
 use crossterm::{
-    event::{self, read, DisableMouseCapture, EnableMouseCapture, Event, KeyCode},
+    event::{read, Event, KeyCode},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use std::{
     cmp::Reverse,
-    default,
-    fs::File,
     io,
-    os::unix::fs::{self},
-    panic,
     path::Path,
     path::PathBuf,
-    str::FromStr,
     time::SystemTime,
 };
 use tui::{
     backend::{Backend, CrosstermBackend},
-    layout::{Constraint, Layout, Margin, Rect},
+    layout::{Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
-    text::{Span, Spans, Text},
-    widgets::{self, Block, Borders, Cell, List, ListItem, ListState, Paragraph},
+    text::{Text},
+    widgets::{self, Block, Borders, List, ListItem, ListState, Paragraph},
     Frame, Terminal,
 };
 
