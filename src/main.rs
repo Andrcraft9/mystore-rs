@@ -463,7 +463,7 @@ impl fmt::Display for Mode {
         match self {
             Mode::Manager => {
                 let help_manager = vec![
-                    String::from("Esc: Quit, end the session"),
+                    String::from("Esc: End the session"),
                     String::from("Down: Select next item"),
                     String::from("Up: Select previous item"),
                     String::from("Enter: Action on the selected item"),
@@ -484,7 +484,7 @@ impl fmt::Display for Mode {
                 let help_editor = vec![
                     String::from("Esc: Quit"),
                     String::from("Ctrl + S: Save the text file"),
-                    String::from("Ctrl + E: Encrypt, and save the encrypted file"),
+                    String::from("Ctrl + E: Encrypt and save the encrypted file"),
                     String::from("Other: See TextArea help"),
                 ];
                 write!(f, "Editor mode\n{}", help_editor.join("; "))
@@ -590,8 +590,16 @@ fn update(
 }
 
 fn draw_session_status<B: Backend>(frame: &mut Frame<B>, area: Rect) {
-    let paragraph = Paragraph::new(Utc::now().to_rfc2822())
-        .block(Block::default().title("Session").borders(Borders::ALL));
+    let paragraph = Paragraph::new(Utc::now().to_rfc2822()).block(
+        Block::default()
+            .border_style(
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            )
+            .title("Session")
+            .borders(Borders::ALL),
+    );
     frame.render_widget(paragraph, area)
 }
 
@@ -604,7 +612,12 @@ fn draw_help<B: Backend>(frame: &mut Frame<B>, area: Rect, mode: &Mode) {
 
 fn draw_error<B: Backend>(frame: &mut Frame<B>, area: Rect, err: &io::Error) {
     let paragraph = Paragraph::new(err.to_string())
-        .block(Block::default().borders(Borders::ALL))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title("Error")
+                .border_style(Style::default().add_modifier(Modifier::BOLD)),
+        )
         .style(Style::default().fg(Color::Red))
         .wrap(widgets::Wrap { trim: true });
     frame.render_widget(paragraph, area)
@@ -621,9 +634,13 @@ fn draw_viewer<B: Backend>(frame: &mut Frame<B>, area: Rect, viewer: &Viewer) {
             Paragraph::new(text)
                 .block(
                     Block::default()
-                        .border_style(Style::default().fg(Color::White))
-                        .title(title)
-                        .borders(Borders::ALL),
+                        .borders(Borders::ALL)
+                        .border_style(
+                            Style::default()
+                                .fg(Color::White)
+                                .add_modifier(Modifier::BOLD),
+                        )
+                        .title(title),
                 )
                 .wrap(widgets::Wrap { trim: true })
                 .scroll((viewer.get_scroll(), 0))
@@ -636,9 +653,13 @@ fn draw_viewer<B: Backend>(frame: &mut Frame<B>, area: Rect, viewer: &Viewer) {
             Paragraph::new(text)
                 .block(
                     Block::default()
-                        .border_style(Style::default().fg(Color::Blue))
-                        .title(title)
-                        .borders(Borders::ALL),
+                        .borders(Borders::ALL)
+                        .border_style(
+                            Style::default()
+                                .fg(Color::Green)
+                                .add_modifier(Modifier::BOLD),
+                        )
+                        .title(title),
                 )
                 .wrap(widgets::Wrap { trim: true })
                 .scroll((viewer.get_scroll(), 0))
@@ -651,9 +672,10 @@ fn draw_viewer<B: Backend>(frame: &mut Frame<B>, area: Rect, viewer: &Viewer) {
             Paragraph::new(text)
                 .block(
                     Block::default()
-                        .border_style(Style::default().fg(Color::Red))
+                        .borders(Borders::ALL)
                         .title(title)
-                        .borders(Borders::ALL),
+                        .border_style(Style::default().fg(Color::Red).add_modifier(Modifier::BOLD))
+                        .style(Style::default().fg(Color::Red)),
                 )
                 .wrap(widgets::Wrap { trim: true })
         }
@@ -679,8 +701,8 @@ fn draw_manager<B: Backend>(frame: &mut Frame<B>, area: Rect, manager: &FileMana
                 .style(Style::default().fg(Color::Blue))
             }
             ManagerEntity::Action(act) => match act {
-                Action::Back => ListItem::new("Back").style(Style::default().fg(Color::Red)),
-                Action::Root => ListItem::new("Root").style(Style::default().fg(Color::Red)),
+                Action::Back => ListItem::new("Back").style(Style::default().fg(Color::Blue)),
+                Action::Root => ListItem::new("Root").style(Style::default().fg(Color::Green)),
             },
         })
         .collect();
@@ -689,11 +711,20 @@ fn draw_manager<B: Backend>(frame: &mut Frame<B>, area: Rect, manager: &FileMana
         .to_str()
         .map_or(String::from("Folder"), |name| String::from(name));
     let list = List::new(items)
-        .block(Block::default().title(title.as_str()).borders(Borders::ALL))
+        .block(
+            Block::default()
+                .title(title.as_str())
+                .borders(Borders::ALL)
+                .border_style(
+                    Style::default()
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD),
+                ),
+        )
         .highlight_style(
             Style::default()
                 .add_modifier(Modifier::BOLD)
-                .fg(Color::Yellow),
+                .bg(Color::Yellow),
         );
     let mut state = ListState::default();
     state.select(manager.get_selected_id());
