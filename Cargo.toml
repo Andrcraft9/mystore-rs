@@ -7,6 +7,8 @@ edition = "2021"
 
 [dependencies]
 tui = "0.19"
-crossterm = "0.27.0"
+crossterm = "0.25.0"
 clap = { version = "4.4.6", features = ["derive"] }
 rpassword = "7.2"
+tui-textarea = { version = "0.2.2", features = ["crossterm"] }
+chrono = "0.4.31"

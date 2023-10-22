@@ -1,10 +1,19 @@
+use chrono::Utc;
 use clap::Parser;
 use crossterm::{
-    event::{read, Event, KeyCode},
+    event::{read, Event, KeyCode, KeyEvent, KeyModifiers},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
-use std::{cmp::Reverse, io, path::Path, path::PathBuf, time::SystemTime};
+use std::{
+    cmp::Reverse,
+    fmt,
+    fs::File,
+    io::{self, Write},
+    path::Path,
+    path::PathBuf,
+    time::SystemTime,
+};
 use tui::{
     backend::{Backend, CrosstermBackend},
     layout::{Constraint, Layout, Rect},
@@ -13,21 +22,22 @@ use tui::{
     widgets::{self, Block, Borders, List, ListItem, ListState, Paragraph},
     Frame, Terminal,
 };
+use tui_textarea::TextArea;
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub enum Action {
     Back,
     Root,
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub enum ManagerEntity {
     TextFile(PathBuf),
     Folder(PathBuf),
     Action(Action),
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub enum Respond {
     Text(String),
     Bin(Vec<u8>),
@@ -39,6 +49,7 @@ pub struct FileManager {
     current: PathBuf,
     entities: Vec<ManagerEntity>,
     selected: Option<usize>,
+    created_entities: Vec<ManagerEntity>,
 }
 
 impl FileManager {
@@ -54,20 +65,34 @@ impl FileManager {
         Ok(file_names)
     }
 
-    fn create_entities(files: Vec<PathBuf>) -> Vec<ManagerEntity> {
-        let mut entities: Vec<ManagerEntity> = files
+    fn create_entities(files: Vec<PathBuf>, is_root: bool) -> Vec<ManagerEntity> {
+        let mut folder_entities: Vec<ManagerEntity> = files
             .iter()
             .filter_map(|path| {
-                if path.is_file() {
-                    Some(ManagerEntity::TextFile(path.clone()))
-                } else if path.is_dir() {
+                if path.is_dir() {
                     Some(ManagerEntity::Folder(path.clone()))
                 } else {
                     None
                 }
             })
             .collect();
-        entities.sort_by_cached_key(|entity| match entity {
+        folder_entities.sort_by_cached_key(|entity| match entity {
+            ManagerEntity::TextFile(path) => Some(path.as_path().to_owned()),
+            ManagerEntity::Folder(path) => Some(path.as_path().to_owned()),
+            ManagerEntity::Action(_act) => None,
+        });
+
+        let mut file_entities: Vec<ManagerEntity> = files
+            .iter()
+            .filter_map(|path| {
+                if path.is_file() {
+                    Some(ManagerEntity::TextFile(path.clone()))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        file_entities.sort_by_cached_key(|entity| match entity {
             ManagerEntity::TextFile(path) => Reverse(path.metadata().map_or(None, |meta| {
                 Some(meta.modified().map_or(SystemTime::UNIX_EPOCH, |st| st))
             })),
@@ -76,15 +101,22 @@ impl FileManager {
             })),
             ManagerEntity::Action(_act) => Reverse(None),
         });
-        entities.push(ManagerEntity::Action(Action::Back));
-        entities.push(ManagerEntity::Action(Action::Root));
+
+        let mut entities = folder_entities;
+        entities.extend(file_entities);
+
+        if !is_root {
+            entities.push(ManagerEntity::Action(Action::Back));
+            entities.push(ManagerEntity::Action(Action::Root));
+        }
 
         entities
     }
 
     fn goto_dir(&mut self, dir: PathBuf) -> Result<(), io::Error> {
+        let is_root = dir == self.root;
         let files = Self::open_dir(&dir)?;
-        self.entities = Self::create_entities(files);
+        self.entities = Self::create_entities(files, is_root);
         self.selected = None;
         self.current = dir;
 
@@ -99,8 +131,9 @@ impl FileManager {
         Ok(Self {
             current: PathBuf::from(root),
             root: PathBuf::from(root),
-            entities: Self::create_entities(files),
+            entities: Self::create_entities(files, true),
             selected: Option::default(),
+            created_entities: Vec::new(),
         })
     }
 
@@ -164,6 +197,64 @@ impl FileManager {
         }
     }
 
+    pub fn refresh(&mut self) -> Result<(), io::Error> {
+        let selected = self.selected;
+        Self::goto_dir(self, self.current.clone())?;
+        selected.map(|id| Self::select(self, id));
+
+        Ok(())
+    }
+
+    pub fn create_file(
+        &mut self,
+        data: Vec<u8>,
+        file_name: Option<String>,
+    ) -> Result<(), io::Error> {
+        let file_name = file_name.map_or(Utc::now().to_rfc3339(), |name| name);
+        let file_path = self.current.join(file_name);
+        let mut file = File::create(file_path.clone())?;
+        file.write_all(&data)?;
+
+        self.created_entities
+            .push(ManagerEntity::TextFile(file_path));
+        self.refresh()?;
+
+        Ok(())
+    }
+
+    pub fn delete_selected(&mut self) -> Result<(), io::Error> {
+        self.selected
+            .map_or(Ok(()), |id| match &self.entities[id] {
+                ManagerEntity::TextFile(path) => self
+                    .created_entities
+                    .iter()
+                    .position(|elem| *elem == ManagerEntity::TextFile(path.clone()))
+                    .map_or(
+                        Err(io::Error::new(
+                            io::ErrorKind::InvalidInput,
+                            "Cannot delete the entity not created in the current session",
+                        )),
+                        |item| {
+                            std::fs::remove_file(path.clone())?;
+                            self.created_entities.remove(item);
+                            Ok(())
+                        },
+                    ),
+                ManagerEntity::Folder(_path) => Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "Cannot delete the folder entity",
+                )),
+                ManagerEntity::Action(_act) => Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "Cannot delete the action entity",
+                )),
+            })?;
+
+        self.refresh()?;
+
+        Ok(())
+    }
+
     pub fn action(&mut self) -> Result<Respond, io::Error> {
         self.selected
             .map_or(Ok(Respond::None), |id| match &self.entities[id] {
@@ -195,9 +286,10 @@ impl FileManager {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub enum ViewerEntity {
     Text(String),
+    DecryptedText(String),
     Binary(Vec<u8>),
 }
 
@@ -209,11 +301,6 @@ pub struct Viewer {
 }
 
 impl Viewer {
-    fn crypt_add(c: i32, count: usize, key: &str) -> i32 {
-        let crypt: Vec<_> = key.bytes().collect();
-        (c + crypt[count] as i32) % 256
-    }
-
     fn crypt_rm(c: i32, count: usize, key: &str) -> i32 {
         let crypt: Vec<_> = key.bytes().collect();
         if c < crypt[count] as i32 {
@@ -252,8 +339,19 @@ impl Viewer {
 
     pub fn set_entity(&mut self, entity: ViewerEntity, name: Option<String>) {
         self.name = name;
-        self.entity = entity;
         self.scroll = 0;
+        match entity {
+            ViewerEntity::Text(_) => self.entity = entity,
+            ViewerEntity::DecryptedText(_) => self.entity = entity,
+            ViewerEntity::Binary(bin) => {
+                // Try to decrypt binary:
+                let decrypted = Self::decrypt_binary(&bin, self.key.as_str());
+                match decrypted {
+                    Ok(text) => self.entity = ViewerEntity::DecryptedText(text),
+                    Err(_) => self.entity = ViewerEntity::Binary(bin),
+                }
+            }
+        }
     }
 
     pub fn get_name(&self) -> Option<String> {
@@ -282,19 +380,6 @@ impl Viewer {
             .map_or(self.scroll, |scroll| scroll)
     }
 
-    pub fn decrypt(&mut self) -> Result<(), std::string::FromUtf8Error> {
-        match &self.entity {
-            ViewerEntity::Text(_text) => Ok(()),
-            ViewerEntity::Binary(bin) => {
-                self.set_entity(
-                    ViewerEntity::Text(Self::decrypt_binary(bin, self.key.as_str())?),
-                    self.name.clone(),
-                );
-                Ok(())
-            }
-        }
-    }
-
     pub fn clear(&mut self) {
         self.name = None;
         self.entity = ViewerEntity::Text(String::new());
@@ -302,21 +387,122 @@ impl Viewer {
     }
 }
 
-#[derive(PartialEq)]
+pub struct Editor<'a> {
+    textarea: Option<TextArea<'a>>,
+    key: String,
+}
+
+impl Editor<'_> {
+    fn crypt_add(c: i32, count: usize, key: &str) -> i32 {
+        let crypt: Vec<_> = key.bytes().collect();
+        (c + crypt[count] as i32) % 256
+    }
+
+    fn encrypt_string(str: &String, key: &str) -> Vec<u8> {
+        let mut encrypt_text: Vec<u8> = Vec::new();
+        let mut count: usize = 0;
+        for byte in str.as_bytes() {
+            let ch = Self::crypt_add(*byte as i32, count, key);
+            encrypt_text.push(ch as u8);
+            count = (count + 1) % 5;
+        }
+
+        encrypt_text
+    }
+}
+
+impl<'a> Editor<'a> {
+    pub fn new(key: &str) -> Editor<'a> {
+        Editor {
+            textarea: None,
+            key: key.to_string(),
+        }
+    }
+
+    pub fn init(&mut self) {
+        self.textarea = Some(TextArea::default());
+    }
+
+    pub fn get_textarea_ref(&self) -> Option<&TextArea<'a>> {
+        self.textarea.as_ref()
+    }
+
+    pub fn get_textarea_mut(&mut self) -> Option<&mut TextArea<'a>> {
+        self.textarea.as_mut()
+    }
+
+    pub fn finish(&mut self) -> Result<String, io::Error> {
+        if let Some(textarea) = self.textarea.take() {
+            return Ok(textarea.into_lines().join("\n"));
+        }
+
+        Ok(String::new())
+    }
+
+    pub fn finish_encrypt(&mut self) -> Result<Vec<u8>, io::Error> {
+        if let Some(textarea) = self.textarea.take() {
+            let text = textarea.into_lines().join("\n");
+            let encrypted_text = Self::encrypt_string(&text, self.key.as_str());
+            return Ok(encrypted_text);
+        }
+
+        Ok(Vec::new())
+    }
+}
+
+#[derive(Clone, PartialEq)]
 enum Mode {
     Manager,
     Viewer,
+    Editor,
     Exit,
 }
 
+impl fmt::Display for Mode {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            Mode::Manager => {
+                let help_manager = vec![
+                    String::from("Esc: Quit, end the session"),
+                    String::from("Down: Select next item"),
+                    String::from("Up: Select previous item"),
+                    String::from("Enter: Action on the selected item"),
+                    String::from("E: Open the editor"),
+                    String::from("N: Create a new editor instance"),
+                    String::from("D: Delete the selected item"),
+                ];
+                write!(f, "Manager mode\n{}", help_manager.join("; "))
+            }
+            Mode::Viewer => {
+                let help_viewer = vec![
+                    String::from("Esc: Quit"),
+                    String::from("Down, Up: Scroll the viewer"),
+                ];
+                write!(f, "Viewer mode\n{}", help_viewer.join("; "))
+            }
+            Mode::Editor => {
+                let help_editor = vec![
+                    String::from("Esc: Quit"),
+                    String::from("Ctrl + S: Save the text file"),
+                    String::from("Ctrl + E: Encrypt, and save the encrypted file"),
+                    String::from("Other: See TextArea help"),
+                ];
+                write!(f, "Editor mode\n{}", help_editor.join("; "))
+            }
+            Mode::Exit => write!(f, "End the session"),
+        }
+    }
+}
+
 fn update(
-    key: KeyCode,
+    key: KeyEvent,
     mode: Mode,
     manager: &mut FileManager,
     viewer: &mut Viewer,
+    editor: &mut Editor,
 ) -> Result<Mode, io::Error> {
     match mode {
-        Mode::Manager => match key {
+        Mode::Manager => match key.code {
             KeyCode::Esc => Ok(Mode::Exit),
             KeyCode::Up => {
                 manager.previous();
@@ -340,9 +526,18 @@ fn update(
                 }
                 Respond::None => Ok(Mode::Manager),
             },
+            KeyCode::Char('e') | KeyCode::Char('E') => Ok(Mode::Editor),
+            KeyCode::Char('n') | KeyCode::Char('N') => {
+                editor.init();
+                Ok(Mode::Editor)
+            }
+            KeyCode::Char('d') | KeyCode::Char('D') => {
+                manager.delete_selected()?;
+                Ok(Mode::Manager)
+            }
             _ => Ok(Mode::Manager),
         },
-        Mode::Viewer => match key {
+        Mode::Viewer => match key.code {
             KeyCode::Up => {
                 viewer.scroll_up(1);
                 Ok(Mode::Viewer)
@@ -351,39 +546,118 @@ fn update(
                 viewer.scroll_down(1);
                 Ok(Mode::Viewer)
             }
-            KeyCode::Enter => {
-                viewer
-                    .decrypt()
-                    .map_err(|err| io::Error::new(io::ErrorKind::Other, err.to_string()))?;
-                Ok(Mode::Viewer)
-            }
             _ => {
                 viewer.clear();
                 Ok(Mode::Manager)
+            }
+        },
+        Mode::Editor => match key {
+            KeyEvent {
+                code: KeyCode::Esc,
+                modifiers: _,
+                kind: _,
+                state: _,
+            } => Ok(Mode::Manager),
+            KeyEvent {
+                code: KeyCode::Char('s') | KeyCode::Char('S'),
+                modifiers: KeyModifiers::CONTROL,
+                kind: _,
+                state: _,
+            } => {
+                let text = editor.finish()?;
+                manager.create_file(text.into_bytes(), None)?;
+                Ok(Mode::Manager)
+            }
+            KeyEvent {
+                code: KeyCode::Char('e') | KeyCode::Char('E'),
+                modifiers: KeyModifiers::CONTROL,
+                kind: _,
+                state: _,
+            } => {
+                let encrypted = editor.finish_encrypt()?;
+                manager.create_file(encrypted, None)?;
+                Ok(Mode::Manager)
+            }
+            _ => {
+                editor
+                    .get_textarea_mut()
+                    .map(|textarea: &mut TextArea<'_>| textarea.input(key));
+                Ok(Mode::Editor)
             }
         },
         Mode::Exit => Ok(Mode::Exit),
     }
 }
 
-fn draw_block<B: Backend>(frame: &mut Frame<B>, area: Rect) {
-    let block = Block::default().title("Block").borders(Borders::ALL);
-    frame.render_widget(block, area);
+fn draw_session_status<B: Backend>(frame: &mut Frame<B>, area: Rect) {
+    let paragraph = Paragraph::new(Utc::now().to_rfc2822())
+        .block(Block::default().title("Session").borders(Borders::ALL));
+    frame.render_widget(paragraph, area)
+}
+
+fn draw_help<B: Backend>(frame: &mut Frame<B>, area: Rect, mode: &Mode) {
+    let paragraph = Paragraph::new(mode.to_string())
+        .block(Block::default().borders(Borders::ALL))
+        .wrap(widgets::Wrap { trim: false });
+    frame.render_widget(paragraph, area)
+}
+
+fn draw_error<B: Backend>(frame: &mut Frame<B>, area: Rect, err: &io::Error) {
+    let paragraph = Paragraph::new(err.to_string())
+        .block(Block::default().borders(Borders::ALL))
+        .style(Style::default().fg(Color::Red))
+        .wrap(widgets::Wrap { trim: true });
+    frame.render_widget(paragraph, area)
 }
 
 fn draw_viewer<B: Backend>(frame: &mut Frame<B>, area: Rect, viewer: &Viewer) {
     let entity = viewer.get_entity_ref();
-    let text = match entity {
-        ViewerEntity::Text(text) => Text::from(text.as_str()),
-        ViewerEntity::Binary(_bin) => Text::from("It is binary file"),
+    let paragraph = match entity {
+        ViewerEntity::Text(text) => {
+            let text = Text::from(text.as_str());
+            let title = viewer
+                .get_name()
+                .map_or(String::from("Text File"), |name| name);
+            Paragraph::new(text)
+                .block(
+                    Block::default()
+                        .border_style(Style::default().fg(Color::White))
+                        .title(title)
+                        .borders(Borders::ALL),
+                )
+                .wrap(widgets::Wrap { trim: true })
+                .scroll((viewer.get_scroll(), 0))
+        }
+        ViewerEntity::DecryptedText(text) => {
+            let text = Text::from(text.as_str());
+            let title = viewer
+                .get_name()
+                .map_or(String::from("Encrypted File"), |name| name);
+            Paragraph::new(text)
+                .block(
+                    Block::default()
+                        .border_style(Style::default().fg(Color::Blue))
+                        .title(title)
+                        .borders(Borders::ALL),
+                )
+                .wrap(widgets::Wrap { trim: true })
+                .scroll((viewer.get_scroll(), 0))
+        }
+        ViewerEntity::Binary(_bin) => {
+            let text = Text::from("Binary file");
+            let title = viewer
+                .get_name()
+                .map_or(String::from("Binary File"), |name| name);
+            Paragraph::new(text)
+                .block(
+                    Block::default()
+                        .border_style(Style::default().fg(Color::Red))
+                        .title(title)
+                        .borders(Borders::ALL),
+                )
+                .wrap(widgets::Wrap { trim: true })
+        }
     };
-    let title = viewer
-        .get_name()
-        .map_or(String::from("Text File"), |name| name);
-    let paragraph = Paragraph::new(text)
-        .block(Block::default().title(title.as_str()).borders(Borders::ALL))
-        .wrap(widgets::Wrap { trim: true })
-        .scroll((viewer.get_scroll(), 0));
     frame.render_widget(paragraph, area)
 }
 
@@ -416,10 +690,21 @@ fn draw_manager<B: Backend>(frame: &mut Frame<B>, area: Rect, manager: &FileMana
         .map_or(String::from("Folder"), |name| String::from(name));
     let list = List::new(items)
         .block(Block::default().title(title.as_str()).borders(Borders::ALL))
-        .highlight_style(Style::default().add_modifier(Modifier::BOLD));
+        .highlight_style(
+            Style::default()
+                .add_modifier(Modifier::BOLD)
+                .fg(Color::Yellow),
+        );
     let mut state = ListState::default();
     state.select(manager.get_selected_id());
     frame.render_stateful_widget(list, area, &mut state);
+}
+
+fn draw_editor<B: Backend>(frame: &mut Frame<B>, area: Rect, editor: &Editor) {
+    editor.get_textarea_ref().map(|textarea| {
+        let widget = textarea.widget();
+        frame.render_widget(widget, area);
+    });
 }
 
 fn run_session(
@@ -429,7 +714,9 @@ fn run_session(
 ) -> Result<(), io::Error> {
     let mut manager = FileManager::new(root)?;
     let mut viewer = Viewer::new(key)?;
+    let mut editor = Editor::new(key);
     let mut mode = Mode::Manager;
+    let mut status: Result<(), io::Error> = Ok(());
 
     // Render loop.
     loop {
@@ -445,15 +732,32 @@ fn run_session(
                 .split(f.size());
             let horizontal_chunks = Layout::default()
                 .direction(tui::layout::Direction::Horizontal)
-                .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
+                .constraints([Constraint::Percentage(25), Constraint::Percentage(75)])
                 .split(vertical_chunks[1]);
+
+            draw_session_status(f, vertical_chunks[0]);
             draw_manager(f, horizontal_chunks[0], &manager);
-            draw_viewer(f, horizontal_chunks[1], &viewer);
+            if mode == Mode::Editor {
+                draw_editor(f, horizontal_chunks[1], &editor);
+            } else {
+                draw_viewer(f, horizontal_chunks[1], &viewer);
+            }
+            if let Err(err) = &status {
+                draw_error(f, vertical_chunks[2], &err);
+            } else {
+                draw_help(f, vertical_chunks[2], &mode);
+            }
         })?;
 
         // Handling input.
         if let Event::Key(key) = read()? {
-            mode = update(key.code, mode, &mut manager, &mut viewer)?;
+            match update(key, mode.clone(), &mut manager, &mut viewer, &mut editor) {
+                Ok(new_mode) => {
+                    status = Ok(());
+                    mode = new_mode;
+                }
+                Err(err) => status = Err(err),
+            }
         }
 
         if mode == Mode::Exit {
